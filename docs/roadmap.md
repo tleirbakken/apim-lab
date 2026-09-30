@@ -53,8 +53,8 @@ so the environment's required reviewers are the real approval gate.
 ### Gotchas
 
 - Workflows need `permissions: id-token: write` or OIDC fails with an unhelpful error.
-- Environment required reviewers on private repos need GitHub Team/Enterprise. Verify
-  against current GitHub plan docs.
+- Environment required reviewers on private repos require GitHub Enterprise. Free, Pro and
+  Team only get them on public repos. Verify against current GitHub docs.
 - With shared key disabled, the bootstrap provider needs `storage_use_azuread = true`.
 - Re-planning inside apply can diverge from the plan approved on the PR. Acceptable in the
   lab; document it. Alternative: pass the plan file as an artifact.
