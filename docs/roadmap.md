@@ -23,7 +23,7 @@ after approval. Zero secrets in GitHub.
 | Identity type | User-assigned managed identity (not App Registration) | No Entra app object lifecycle, lives in Azure RBAC, supports federated credentials |
 | Number of identities | Two: `id-gh-plan-lab` and `id-gh-apply-lab` | Least privilege; PRs must not be able to write |
 | Plan permissions | Reader on subscription + Storage Blob Data Contributor on state container | Plan writes the state lock |
-| Apply permissions | Contributor + Role Based Access Control Administrator with condition | Later phases need role assignments (APIM MI → Key Vault) without Owner |
+| Apply permissions | Contributor + Storage Blob Data Contributor on state container + Role Based Access Control Administrator with condition (role allowlist) | Contributor has no data actions, so state needs its own role; later phases need role assignments (APIM MI → Key Vault) without Owner |
 | State auth | Shared key disabled, Entra auth in backend (`use_azuread_auth`, `use_oidc`) | No access keys anywhere |
 | GitHub values | Tenant/subscription/client IDs as repo *variables*, not secrets | Not secret; readable in logs when debugging |
 
@@ -56,6 +56,12 @@ so the environment's required reviewers are the real approval gate.
 - Environment required reviewers on private repos require GitHub Enterprise. Free, Pro and
   Team only get them on public repos. Verify against current GitHub docs.
 - With shared key disabled, the bootstrap provider needs `storage_use_azuread = true`.
+- With shared key disabled, the operator running `-migrate-state` needs Storage Blob Data
+  Contributor on the container. Owner/Contributor on the subscription is not enough.
+- azurerm 5.x is released (5.0.0 onwards). The repo is pinned to `~> 4.81`; upgrading is a
+  separate decision after reading the 5.0 upgrade guide.
+- Set `resource_provider_registrations = "none"` in `infra/envs/lab`, or the Reader-only plan
+  identity fails trying to register resource providers.
 - Re-planning inside apply can diverge from the plan approved on the PR. Acceptable in the
   lab; document it. Alternative: pass the plan file as an artifact.
 

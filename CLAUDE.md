@@ -17,6 +17,9 @@ and GitHub Actions. Everything is deployed with Terraform through GitHub Actions
 - Flag anything that has changed recently in Azure, azurerm or GitHub Actions, and point me
   to the official docs rather than guessing.
 - Use plan mode for anything touching more than one file.
+- At the end of every session, update `docs/build-guide.md`: fill in or refine the sections for
+  steps completed, update status lines, add any gotchas hit, and add a newest-first row to the
+  Progress log. The guide is reused across projects, so keep it detailed and in English.
 
 ## Hard rules
 
@@ -45,7 +48,7 @@ and GitHub Actions. Everything is deployed with Terraform through GitHub Actions
 bootstrap/           run locally once: state storage, UAMIs, federated creds, RBAC
 infra/envs/lab/      backend, providers, composition, lab.tfvars
 infra/modules/       network, backend, apim, appgw
-docs/                roadmap.md, phase-N.md
+docs/                roadmap.md, build-guide.md (living guide), phase-N.md
 ```
 
 ## Target architecture
