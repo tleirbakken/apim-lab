@@ -93,6 +93,13 @@ Settle these before writing any code; three of them are baked into resource name
 | Region | `westeurope` | All bootstrap resources. Pick one with capacity for the services you plan to run later. |
 | Naming | CAF abbreviations + `-lab` suffix | `rg-`, `st`, `id-` etc. Storage accounts allow no hyphens and max 24 chars. |
 | Identity type | User-assigned managed identity | No Entra app registration to manage; lives in Azure RBAC and Terraform. |
+| Subscription layout | One subscription for state, identities and the lab (for now) | Bootstrap's `subscription_id` is used both for where state/identities live and as the scope of the pipeline's Reader/Contributor/RBAC Admin roles. In a CAF layout, state and identities belong in the **Management** subscription, while workloads belong in a separate landing-zone subscription. To split them, add a `target_subscription_id` variable and use it as the scope of `plan_reader`, `apply_contributor` and `apply_rbac_admin`. |
+
+**Check Azure Policy first.** If the subscription sits under management groups with policy assignments, a policy can block bootstrap (for example one denying storage accounts with public network access, which the state account deliberately has). List what applies:
+
+```bash
+az policy assignment list --scope /subscriptions/<subscription-id> --disable-scope-strict-match -o table
+```
 
 **Public repo hygiene:** with a public repo, everything committed is world-readable. That is fine here because the design has no secrets: tenant, subscription and client IDs are identifiers, not credentials. Never commit `.tfstate`, `.tfvars` with secrets or `.env` files.
 
@@ -150,7 +157,7 @@ git push -u origin main
 
 ## Step 2: Bootstrap layer
 
-Seven files in `bootstrap/` create 14 resources: the state storage, two GitHub identities, their OIDC trust and six role assignments. Status in apim-lab: **written, validated, not yet applied**. The repo version carries a comment above every block; the excerpts below are trimmed to the code plus the reasoning.
+Seven files in `bootstrap/` create 14 resources: the state storage, two GitHub identities, their OIDC trust and six role assignments. Status in apim-lab: **applied 2026-09-30** (14 added, 0 changed, 0 destroyed). The repo version carries a comment above every block; the excerpts below are trimmed to the code plus the reasoning.
 
 | File | Creates | Resources |
 | --- | --- | --- |
@@ -349,7 +356,7 @@ terraform -chdir=bootstrap plan -var-file=bootstrap.tfvars   # expect: 14 to add
 
 ## Step 3: Run bootstrap and migrate its state
 
-Bootstrap runs once with local state, then moves its own state into the container it just created, so no state file stays on a laptop. Status in apim-lab: **next up**. This section will be refined with real output once it has been run.
+Bootstrap runs once with local state, then moves its own state into the container it just created, so no state file stays on a laptop. Status in apim-lab: **done 2026-09-30**. State migrated and verified with `plan` = No changes.
 
 **3.1 Apply locally.** Fill in `bootstrap.tfvars`, then:
 
@@ -361,17 +368,42 @@ terraform -chdir=bootstrap apply bootstrap.tfplan
 terraform -chdir=bootstrap output
 ```
 
+In **PowerShell**, quote every argument that starts with `-` and contains a dot, or PowerShell splits it in two and Terraform fails with `Too many command line arguments`:
+
+```powershell
+terraform -chdir=bootstrap plan "-var-file=bootstrap.tfvars" "-out=bootstrap.tfplan"
+terraform -chdir=bootstrap apply "bootstrap.tfplan"
+```
+
 Applying a saved plan file guarantees that what runs is exactly what you reviewed. `*.tfplan` is gitignored.
+
+**Before `apply`, read the plan.** Expect 14 to add, nothing to change or destroy. Check in particular: `shared_access_key_enabled = false` on the storage account; both `subject` values contain the repo name exactly as on GitHub (case matters); the `condition` on the RBAC Administrator assignment.
+
+**Expected output** (apim-lab values; IDs are identifiers, not secrets):
+
+```
+Apply complete! Resources: 14 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+client_id_apply            = "58d12c0f-307c-4f2c-8508-fb69d6a040ac"
+client_id_plan             = "b1e3d287-0c04-411d-9970-246b2325459b"
+state_container_name       = "tfstate"
+state_resource_group_name  = "rg-tfstate-lab"
+state_storage_account_name = "sttfstatelab0c4dr1"
+subscription_id            = "0e2aca92-b024-46cc-bebc-a03d4284aa6c"
+tenant_id                  = "1a1581a8-1500-43bc-aec2-cbf3c4eb52ed"
+```
 
 **3.2 Wait for RBAC.** Role assignments can take a few minutes to take effect. If the next step fails with `403 AuthorizationPermissionMismatch`, wait and retry; do not add keys.
 
-**3.3 Add a backend block** as `bootstrap/backend.tf`, using the values from `terraform output`:
+**3.3 Add a backend block** as `bootstrap/backend.tf`, using the values from `terraform output` (apim-lab version):
 
 ```hcl
 terraform {
   backend "azurerm" {
     resource_group_name  = "rg-tfstate-lab"
-    storage_account_name = "sttfstatelab<suffix>"
+    storage_account_name = "sttfstatelab0c4dr1"
     container_name       = "tfstate"
     key                  = "bootstrap.tfstate"
     use_azuread_auth     = true
@@ -379,6 +411,9 @@ terraform {
 }
 ```
 
+- `terraform { }` holds settings for Terraform itself, not for Azure. Terraform merges all `terraform {}` blocks across files, so the backend can live in its own file next to `versions.tf`.
+- `backend "azurerm"` says where state is stored: Azure Blob Storage. Without a backend block, state is the local `terraform.tfstate` file.
+- The first three arguments locate the container: `sttfstatelab0c4dr1.blob.core.windows.net/tfstate`. The account name contains the random suffix, so copy it exactly from the output.
 - `use_azuread_auth = true` makes the backend use Entra ID for blob access. Without it the backend tries keys and fails.
 - Backend blocks cannot use variables, so the values are literal. They are not secret.
 - `key` is the blob name. Each layer gets its own key (`bootstrap.tfstate`, `lab.tfstate`), so layers never share or lock each other's state.
@@ -397,12 +432,25 @@ Answer `yes` when asked to copy the existing state. This works because bootstrap
 - The blob `bootstrap.tfstate` exists in the container (check in the portal, which uses Entra auth).
 - Delete the local `bootstrap/terraform.tfstate` and `terraform.tfstate.backup` once remote state is confirmed. Do not open or print them; they can contain sensitive values.
 - `az storage account show -n <name> --query allowSharedKeyAccess` returns `false`.
+- Delete `bootstrap.tfplan` too: a plan file embeds a copy of state and is stale after apply.
+
+**3.6 Commit.** Stage paths explicitly rather than `git add .`, and check the staged list before committing:
+
+```bash
+git status
+git add bootstrap/ docs/ CLAUDE.md
+git status          # no .tfstate, .tfplan or .terraform/ in "Changes to be committed"
+git commit -m "feat(bootstrap): state storage, GitHub OIDC identities and RBAC"
+git push
+```
+
+`.terraform.lock.hcl` and `backend.tf` are committed; `.terraform/` (downloaded providers) is ignored. Committing straight to `main` is fine at this point because no workflow exists yet; from Step 7 on, changes go through a branch and a pull request.
 
 **Chicken-and-egg note:** if you ever destroy bootstrap, first migrate its state back to local (`terraform init -migrate-state` after removing `backend.tf`), because destroy deletes the container holding its own state.
 
 ## Steps 4–9: GitHub wiring and the pipeline
 
-These steps turn the bootstrap outputs into a working plan-on-PR, apply-on-merge pipeline. Status in apim-lab: **not started**. Each step is sketched with what is known now and will be expanded with the real files, output and pitfalls as we build it.
+These steps turn the bootstrap outputs into a working plan-on-PR, apply-on-merge pipeline. Status in apim-lab: **Step 4 next**. Each step is sketched with what is known now and will be expanded with the real files, output and pitfalls as we build it.
 
 ### Step 4: Repo variables
 
@@ -416,6 +464,8 @@ GitHub → repo → Settings → Secrets and variables → Actions → **Variabl
 | `AZURE_CLIENT_ID_APPLY` | `terraform output client_id_apply` |
 
 Or with the GitHub CLI: `gh variable set AZURE_TENANT_ID --body "<value>"`.
+
+Why variables and not secrets: these are identifiers. Without a federated credential that matches the token, a client ID grants nothing. Variables stay visible in workflow logs, which makes login failures far easier to debug. The names must match exactly, because the workflows read them as `vars.AZURE_CLIENT_ID_PLAN` and so on.
 
 ### Step 5: Environment `lab` with required reviewers
 
@@ -542,6 +592,7 @@ Most failures in this setup come from four things: a missing `id-token` permissi
 | Provider errors calling `listKeys` | Shared key disabled but provider not told | `storage_use_azuread = true` in the provider; `use_azuread_auth = true` in the backend. |
 | `PrincipalNotFound` when assigning a role to a new identity | Entra replication delay | Set `principal_type` on the role assignment. |
 | Plan identity fails registering resource providers | azurerm registers providers by default, which is a write | `resource_provider_registrations = "none"` in the provider for pipeline-run layers. |
+| `Error: Too many command line arguments` in PowerShell | PowerShell splits `-flag=value.ext` at the dot | Quote the argument: `"-var-file=bootstrap.tfvars"`, `"-out=bootstrap.tfplan"`. |
 | `StorageAccountAlreadyTaken` | Storage names are globally unique | That is what the random suffix is for. |
 | Apply job runs without waiting for approval | Environment has no required reviewers, or the job lacks `environment:` | Configure reviewers; check the job definition. |
 | Required reviewers option missing | Private repo on Free/Pro/Team | Make the repo public, or use Enterprise. |
@@ -592,7 +643,7 @@ Copying this foundation into a new repo means changing seven values and re-check
 
 **Copy**
 
-- [ ] `bootstrap/` (all seven files)
+- [ ] `bootstrap/` (all seven files, plus `backend.tf` after the first apply)
 - [ ] `.gitignore`
 - [ ] Later: `.github/workflows/tf-plan.yml` and `tf-apply.yml`
 
@@ -618,10 +669,12 @@ Copying this foundation into a new repo means changing seven values and re-check
 
 ## Progress log (apim-lab)
 
-Phase 1, step 2 of 9: bootstrap is written and validated; next is running it and migrating its state.
+Phase 1, step 3 of 9 done: bootstrap is applied and its state lives in Azure. Next session: Step 4 (GitHub repo variables), then Step 5 (environment `lab` with required reviewer).
 
 | Date | What | Notes |
 | --- | --- | --- |
+| 2026-09-30 | Bootstrap state migrated to Azure | `backend.tf` added; `init -migrate-state`; `plan` shows No changes. |
+| 2026-09-30 | Bootstrap applied | 14 added. PowerShell needs quoted `-var-file`/`-out` arguments. All in one subscription for now; split via `target_subscription_id` if the lab moves to its own landing zone. |
 | 2026-09-30 | Build guide moved into the repo as `docs/build-guide.md` | Updated at the end of every session (rule in `CLAUDE.md`). |
 | 2026-09-30 | Bootstrap files commented block by block | Comments say what each block does and why; fmt and validate still pass. |
 | 2026-09-30 | Roadmap design table corrected | Apply identity needs Storage Blob Data Contributor on state; operator needs it for `-migrate-state`; azurerm 5.x noted. |
